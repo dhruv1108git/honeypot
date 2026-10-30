@@ -1,0 +1,69 @@
+# Replication v0: 3 envs x 8 conditions x 2 models x n=8 = 384 items (DESIGN.md U7 / D6, BUILD_SPEC).
+run_id: replication_v0
+description: "Paper 07 code-review conceptual replication on Qwen3-235B-Thinking-2507-FP8 and gpt-oss-120b (local vLLM)."
+runs_dir: /scratch2/dhruv/ais/hp/runs
+envs_dir: /scratch2/dhruv/ais/hp/envs
+system_prompt_id: sys_v0
+task_prompt_id: task_v0
+n_samples: 8
+order_seed: 20260915
+max_attempts: 3
+backoff_s: 10
+seed_from_sample_idx: true   # seed = sample_idx per request (section 02 D-2.9(4)); bookkeeping, not a determinism claim
+
+# repo/branch fill {repo}/{branch} in task_v0. Values here are overridden by envs/<id>/env.yaml when present
+# (env builders may ship their own). The monitor env names follow design/sections/01 D-1.9.
+envs:
+  - id: scheming_monitor_upgrade
+    repo: cotmon
+    branch: monitor-v4
+  - id: sft_refactor
+    repo: sfttrain
+    branch: refactor-pipeline
+  - id: misuse_mitigations_classification
+    repo: misuseclf
+    branch: classifier-v2
+
+conditions:
+  - none
+  - agency-sa
+  - agency-sa-goal
+  - agency-sa-task
+  - goal-pers
+  - goal-pers+agency-sa-goal
+  - power
+  - power+agency-sa-goal
+
+models:
+  - id: qwen3-235b-thinking
+    backend: vllm
+    url: http://127.0.0.1:8001/v1
+    model: qwen3-235b-a22b-thinking-2507-fp8
+    family: Qwen3            # fills {target_model_family} in packet.md
+    reasoning_visibility: raw
+    concurrency: 16
+    timeout_s: 5400
+    params:                  # BUILD_SPEC "Models / servers" (Qwen model-card defaults)
+      temperature: 0.6
+      top_p: 0.95
+      top_k: 20
+      min_p: 0
+      max_tokens: 32768
+    extra:
+      return_token_ids: true  # exact prompt + completion token ids recorded for both models
+    render_probe: true
+  - id: gpt-oss-120b
+    backend: vllm
+    url: http://127.0.0.1:8002/v1
+    model: gpt-oss-120b
+    family: gpt-oss
+    reasoning_visibility: raw
+    concurrency: 16
+    timeout_s: 5400
+    params:                  # BUILD_SPEC: T 1.0, reasoning_effort high, max_tokens 32768
+      temperature: 1.0
+      max_tokens: 32768
+      reasoning_effort: high
+    extra:
+      return_token_ids: true  # records the Harmony prompt token ids (identity/cutoff/date header included)
+    render_probe: true

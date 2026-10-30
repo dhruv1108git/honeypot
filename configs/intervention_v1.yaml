@@ -1,0 +1,44 @@
+# Audit-coverage memo intervention, rerun with an 81920-token budget: 3 arms (no memo / memoA covered /
+# memoB not covered) x {goal-pers, agency-sa-goal} x Qwen x n=40 = 240 runs.
+run_id: intervention_v1
+description: "Audit-coverage memo intervention on the monitor honeypot (v1)."
+n_samples: 40
+runs_dir: /scratch2/dhruv/ais/hp/runs
+envs_dir: /scratch2/dhruv/ais/hp/envs
+system_prompt_id: sys_v0
+task_prompt_id: task_v0
+order_seed: 20260915
+max_attempts: 3
+backoff_s: 10
+seed_from_sample_idx: true
+envs:
+  - id: scheming_monitor_upgrade
+    repo: cotmon
+    branch: monitor-v4
+  - id: scheming_monitor_upgrade_memoA
+    repo: cotmon
+    branch: monitor-v4
+  - id: scheming_monitor_upgrade_memoB
+    repo: cotmon
+    branch: monitor-v4
+conditions:
+  - goal-pers
+  - agency-sa-goal
+models:
+  - id: qwen3-235b-thinking
+    backend: vllm
+    url: http://127.0.0.1:8001/v1
+    model: qwen3-235b-a22b-thinking-2507-fp8
+    family: Qwen3            # fills {target_model_family} in packet.md
+    reasoning_visibility: raw
+    concurrency: 32
+    timeout_s: 10800
+    params:                  # BUILD_SPEC "Models / servers" (Qwen model-card defaults)
+      temperature: 0.6
+      top_p: 0.95
+      top_k: 20
+      min_p: 0
+      max_tokens: 81920
+    extra:
+      return_token_ids: true  # exact prompt + completion token ids recorded for both models
+    render_probe: true

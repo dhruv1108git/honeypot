@@ -1,0 +1,37 @@
+# Smoke test: 1 env x 2 conditions x Qwen only x n=1 = 2 items. Uses the placeholder env `_smoke`;
+# point `envs[0].id` at a real env (e.g. scheming_monitor_upgrade) to smoke-test a real packet.
+run_id: smoke
+description: "Runner plumbing check against the local Qwen server."
+runs_dir: /scratch2/dhruv/ais/hp/runs
+envs_dir: /scratch2/dhruv/ais/hp/tests/fixtures/envs
+n_samples: 1
+order_seed: 0
+max_attempts: 2
+backoff_s: 5
+seed_from_sample_idx: true
+
+envs:
+  - id: _smoke          # repo/branch come from envs/_smoke/env.yaml
+
+conditions:
+  - none
+  - goal-pers+agency-sa-goal
+
+models:
+  - id: qwen3-235b-thinking
+    backend: vllm
+    url: http://127.0.0.1:8001/v1
+    model: qwen3-235b-a22b-thinking-2507-fp8
+    family: Qwen3
+    reasoning_visibility: raw
+    concurrency: 2
+    timeout_s: 3600
+    params:
+      temperature: 0.6
+      top_p: 0.95
+      top_k: 20
+      min_p: 0
+      max_tokens: 32768
+    extra:
+      return_token_ids: true
+    render_probe: true

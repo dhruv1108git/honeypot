@@ -1,0 +1,38 @@
+# Blind raters for analysis/rate.py. All three get the same judge/judge_v2.md prompt (the paper's App. A scales)
+# and never see the system prompt or the condition. glm53 and dsv4pro each run alone on all 8 GPUs via
+# serve_rater.sh at reasoning effort High; codex (CLI 0.162.1, ChatGPT login) is the tie-breaker on disputed items only.
+# serve_rater.sh runs no reasoning parser (rate.py splits at the </think> token id) and no prefix caching.
+glm53:
+  hf: nvidia/GLM-5.3-NVFP4
+  revision: e3b8f9f2fad29727dfa95e766c5cac18ea1414bf
+  served_name: glm-5.3-nvfp4
+  url: http://127.0.0.1:8003/v1
+  concurrency: 32
+  timeout_s: 14400
+  params: {temperature: 1.0, top_p: 0.95}   # model card sampling; no max_tokens: vLLM allows the rest of the context
+  chat_template_kwargs: {reasoning_effort: high}   # template: low | high | max; unset = Max (always thinks)
+  prompt_check: {must: ["Reasoning Effort: High"]}   # rate.py renders the template on the server and checks this
+  # rate.py refuses a server that differs: version and context from the API, args / args_not in its `vllm serve` command
+  serve: {vllm: 0.30.0, max_model_len: 262144, args: ["--kv-cache-dtype bfloat16", "--no-enable-prefix-caching"],
+          args_not: ["--reasoning-parser", "--enable-prefix-caching"]}
+dsv4pro:
+  hf: nvidia/DeepSeek-V4-Pro-NVFP4
+  revision: 1449d1e641023406daf6b432361486c768aad740
+  served_name: deepseek-v4-pro-nvfp4
+  url: http://127.0.0.1:8003/v1
+  concurrency: 32
+  timeout_s: 14400
+  params: {temperature: 1.0, top_p: 1.0}    # generation_config.json sampling; no max_tokens, as glm53
+  # The checkpoint's Think High (its encoding/encoding_dsv4.py, effort "high") adds no effort line. vLLM 0.30 renamed the
+  # levels: its "low" renders exactly that prompt, while its "high" renders the checkpoint's Think Max. So "low" here.
+  chat_template_kwargs: {thinking: true, reasoning_effort: low}
+  prompt_check: {must: ["<think>"], must_not: ["Reasoning Effort"]}   # any effort line = Max or beyond
+  serve: {vllm: 0.30.0, max_model_len: 262144,
+          args: ["--tokenizer-mode deepseek_v4", "--kv-cache-dtype fp8", "--no-enable-prefix-caching"],
+          args_not: ["--reasoning-parser", "--enable-prefix-caching"]}
+codex:
+  model: gpt-6.1-sol
+  reasoning_effort: high
+  concurrency: 4
+  timeout_s: 3600
+  cpus: 188-192   # pinned so it can't disturb GPU work on the node

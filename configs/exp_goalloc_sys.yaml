@@ -1,0 +1,39 @@
+# Goal-in-memo study — SYS cells (power goal in the SYSTEM prompt). See experiments/goal_in_memo/PLAN.md.
+# condition=power puts the power directive in the system prompt; the memo here is the NEUTRAL rich audit memo.
+run_id: exp_goalloc_sys
+description: "Goal-location study, SYS arm: power goal in system prompt, neutral rich audit memo. Qwen."
+runs_dir: /scratch2/dhruv/ais/hp/runs
+n_samples: 16
+order_seed: 20261028
+max_turns: 16
+max_tool_calls: 12
+envs:
+  - id: sys_mention
+    base: scheming_monitor_upgrade
+    repo: cotmon
+    branch: monitor-v4
+    arm: SYS_mention
+    memo: audit_coverage_rich
+    incentive: task_mention
+  - id: sys_nomention
+    base: scheming_monitor_upgrade
+    repo: cotmon
+    branch: monitor-v4
+    arm: SYS_nomention
+    memo: audit_coverage_rich
+    incentive: none
+conditions:
+  - power
+models:
+  - id: qwen3-235b-thinking
+    backend: openrouter
+    url: https://openrouter.ai/api/v1
+    model: qwen/qwen3-235b-a22b-thinking-2507
+    family: Qwen3
+    reasoning_visibility: raw
+    concurrency: 12
+    timeout_s: 1200
+    params:
+      temperature: 0.6
+      top_p: 0.95
+      max_tokens: 20480

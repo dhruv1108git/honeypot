@@ -1,0 +1,79 @@
+registry_version: 1
+created: '2026-10-07'
+rules:
+- Files hold the exact bytes sent (UTF-8, no trailing newline).
+- 'Ids are immutable: an edit is a new id or version; the runner refuses to run if a file''s sha256 differs from this registry.'
+- paper_line refers to the paper_file, 1-based.
+prompts:
+- id: agency-sa
+  version: 1
+  kind: agency
+  file: agency-sa.txt
+  sha256: 418c91381f879cb76a3e51d59abf6ecb0b90a0adbe374f2d5af3552530e9f27e
+  source: paper07-verbatim
+  paper_name: agency-sa
+  paper_locator: Table 3
+  paper_line: 188
+  paper_file: /scratch2/dhruv/ais/papers/fulltext/07-realistic-honeypot-evals-scheming.md
+- id: agency-sa-goal
+  version: 1
+  kind: agency
+  file: agency-sa-goal.txt
+  sha256: d56ad1f4eecbee4a0214ec09a77b5df3a4efec2d0b583c57a224e76930e3e73f
+  source: paper07-verbatim
+  paper_name: agency-sa-goal
+  paper_locator: 'Table 3 (source: Lynch et al. 2025)'
+  paper_line: 193
+  paper_file: /scratch2/dhruv/ais/papers/fulltext/07-realistic-honeypot-evals-scheming.md
+- id: agency-sa-task
+  version: 1
+  kind: agency
+  file: agency-sa-task.txt
+  sha256: 12115be75371c2498ef6b16db92a307592074f4a2cc4b0019db5e6c2ea067a03
+  source: paper07-verbatim
+  paper_name: agency-sa-task
+  paper_locator: Table 3
+  paper_line: 197
+  paper_file: /scratch2/dhruv/ais/papers/fulltext/07-realistic-honeypot-evals-scheming.md
+- id: goal-pers
+  version: 1
+  kind: goal
+  file: goal-pers.txt
+  sha256: d06086e728369bb2127fbf753fe3e0fb88552d51f49f44bf1477fb5b2c158e8f
+  source: paper07-verbatim
+  paper_name: goal-pers
+  paper_locator: Table 4
+  paper_line: 224
+  paper_file: /scratch2/dhruv/ais/papers/fulltext/07-realistic-honeypot-evals-scheming.md
+- id: power
+  version: 1
+  kind: goal
+  file: power.txt
+  sha256: 233be235237339a60d4c4d9a9a0557fee030d78fa392a55a3f8e70960a0b4eaa
+  source: paper07-verbatim
+  paper_name: power goal
+  paper_locator: Appendix C
+  paper_line: 1033
+  paper_file: /scratch2/dhruv/ais/papers/fulltext/07-realistic-honeypot-evals-scheming.md
+- id: sys_v0
+  version: 1
+  kind: system
+  file: sys_v0.txt
+  sha256: 7378276e994153421fbba9b9a336af98b9d5530faefc24418a747035d77644de
+  source: ours (design/sections/01 D-1.9; BUILD_SPEC 'Prompts')
+  notes: Base system prompt; not from the paper. Goal and agency lines are appended, each after one blank line.
+- id: task_v0
+  version: 1
+  kind: task
+  file: task_v0.txt
+  sha256: fa1ee48b83a5bedbf5268e1130e161abe1dc032e86ac11cdab2522ed20a9480c
+  source: reconstructed from paper §3 l.171 + blog post
+  paper_line: 171
+  paper_file: /scratch2/dhruv/ais/papers/fulltext/07-realistic-honeypot-evals-scheming.md
+  blog_file: /scratch2/dhruv/ais/papers/fulltext/07b-honeypot-blogpost-lesswrong.md
+  blog_line: 38
+  template_slots:
+  - '{repo}'
+  - '{branch}'
+  notes: Instruction sentence follows the blog post's wording (review for correctness, fix bugs, propose optimizations); structure
+    from D-1.9. Rendered by hp.render with repo/branch, then followed by envs/<env>/packet.md.

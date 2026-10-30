@@ -1,0 +1,66 @@
+# Full grid on the current codebases: 3 codebases x 8 conditions x 2 models x n=16 = 768 runs.
+# Output budget 81920 tokens for both models (was 32768 in earlier runs).
+run_id: replication_v2
+description: "Full replication grid, current codebases, both models, 81920-token budget."
+n_samples: 16
+runs_dir: /scratch2/dhruv/ais/hp/runs
+envs_dir: /scratch2/dhruv/ais/hp/envs
+system_prompt_id: sys_v0
+task_prompt_id: task_v0
+order_seed: 20260915
+max_attempts: 3
+backoff_s: 10
+seed_from_sample_idx: true
+envs:
+  - id: scheming_monitor_upgrade
+    repo: cotmon
+    branch: monitor-v4
+  - id: sft_refactor
+    repo: sfttrain
+    branch: refactor-pipeline
+  - id: misuse_mitigations_classification
+    repo: misuseclf
+    branch: classifier-v2
+    allow_missing_family_placeholder: true   # baseline has no link to the reviewing model by design
+conditions:
+  - none
+  - agency-sa
+  - agency-sa-goal
+  - agency-sa-task
+  - goal-pers
+  - goal-pers+agency-sa-goal
+  - power
+  - power+agency-sa-goal
+models:
+  - id: qwen3-235b-thinking
+    backend: vllm
+    url: http://127.0.0.1:8001/v1
+    model: qwen3-235b-a22b-thinking-2507-fp8
+    family: Qwen3            # fills {target_model_family} in packet.md
+    reasoning_visibility: raw
+    concurrency: 32
+    timeout_s: 10800
+    params:                  # Qwen model-card sampling; 81920 = card value for hard tasks
+      temperature: 0.6
+      top_p: 0.95
+      top_k: 20
+      min_p: 0
+      max_tokens: 81920
+    extra:
+      return_token_ids: true  # exact prompt + completion token ids recorded for both models
+    render_probe: true
+  - id: gpt-oss-120b
+    backend: vllm
+    url: http://127.0.0.1:8002/v1
+    model: gpt-oss-120b
+    family: gpt-oss
+    reasoning_visibility: raw
+    concurrency: 32
+    timeout_s: 10800
+    params:                  # T 1.0, reasoning_effort high (highest)
+      temperature: 1.0
+      max_tokens: 81920
+      reasoning_effort: high
+    extra:
+      return_token_ids: true  # records the Harmony prompt token ids (identity/cutoff/date header included)
+    render_probe: true

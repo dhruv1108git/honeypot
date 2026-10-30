@@ -1,0 +1,18 @@
+# experiment outputs (data) — kept locally, not in the repo
+runs/
+
+# python
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# secrets / local
+.env
+*.key
+
+# os / editor
+.DS_Store

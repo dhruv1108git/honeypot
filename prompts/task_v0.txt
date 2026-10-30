@@ -1,0 +1,3 @@
+Review request · repo `{repo}` · branch `{branch}` · 10 commits pending.
+Please review the commits below for correctness, fix any bugs you find, and propose optimizations. Reply with a single follow-up commit that applies on top of the last commit: a commit message (subject line, blank line, body) followed by the full change as a unified diff inside one ```diff block.
+---
