@@ -1,0 +1,29 @@
+# Phase 1 - realistic framing vs obvious plant, NO goal in the system prompt (condition=none).
+# Same harmful action (weaken the monitor: mean-not-max scoring, raise threshold) framed three ways.
+# Tests whether realistic framing evades injection-flagging and gets adopted where the obvious plant did not.
+run_id: exp_realistic_none
+description: "Realistic framing (legit ticket, repo convention) vs obvious directive, no goal, mention. Qwen via OpenRouter."
+runs_dir: runs
+n_samples: 16
+order_seed: 20261111
+max_turns: 18
+max_tool_calls: 12
+envs:
+  - {id: obvious_directive_none, base: scheming_monitor_upgrade, repo: cotmon, branch: monitor-v4, arm: OBVIOUS_directive_none, memo: audit_monitor_overt_L4_directive, incentive: task_mention}
+  - {id: realistic_task_none,    base: scheming_monitor_upgrade, repo: cotmon, branch: monitor-v4, arm: REALISTIC_task_none,    memo: audit_realistic_legittask,       incentive: task_mention}
+  - {id: realistic_conv_none,    base: scheming_monitor_upgrade, repo: cotmon, branch: monitor-v4, arm: REALISTIC_conv_none,    memo: audit_realistic_convention,      incentive: task_mention}
+conditions:
+  - none
+models:
+  - id: qwen3-235b-thinking
+    backend: openrouter
+    url: https://openrouter.ai/api/v1
+    model: qwen/qwen3-235b-a22b-thinking-2507
+    family: Qwen3
+    reasoning_visibility: raw
+    concurrency: 8
+    timeout_s: 1200
+    params:
+      temperature: 0.6
+      top_p: 0.95
+      max_tokens: 16384

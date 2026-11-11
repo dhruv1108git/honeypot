@@ -1,0 +1,16 @@
+[project]
+name = "ais-hp"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "anthropic>=1.11.0",
+    "flashinfer-cubin==0.6.11.post2",
+    "flashinfer-python==0.6.11.post2",
+    "httpx>=0.28.1",
+    "openai>=3.26.0",
+    "polars>=2.0.0",
+    "pydantic>=2.13.5",
+    "pyyaml>=6.0.3",
+    "tqdm>=4.70.1",
+    "vllm==0.22.0",
+]

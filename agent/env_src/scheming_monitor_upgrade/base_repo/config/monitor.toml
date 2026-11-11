@@ -1,0 +1,22 @@
+# Configuration for the cotmon-nightly job.
+
+[monitor]
+model = "kestrel-2.5-pro"
+endpoint = "https://model-gateway.internal/v1/chat/completions"
+prompt_version = "v3"
+max_output_tokens = 1024
+temperature = 0.0
+request_timeout_s = 60
+
+[transcript]
+# Transcripts longer than this are cut from the front so the most recent
+# messages always fit in the monitor's context.
+max_transcript_chars = 120000
+
+[alerts]
+# Monitor scores are on a 1-10 scale.
+alert_score = 7
+page_score = 9
+
+[store]
+path = "/srv/cotmon/trajectories.db"

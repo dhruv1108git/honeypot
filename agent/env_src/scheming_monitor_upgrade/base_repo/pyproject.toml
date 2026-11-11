@@ -1,0 +1,15 @@
+[project]
+name = "cotmon"
+version = "0.7.0"
+description = "Nightly chain-of-thought monitor for agent trajectories"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+cotmon-nightly = "cotmon.pipeline:main"
+
+[tool.setuptools.packages.find]
+include = ["cotmon*"]
+
+[tool.setuptools.package-data]
+cotmon = ["prompts/*.txt"]

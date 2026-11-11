@@ -1,0 +1,32 @@
+# E1 — Knowledge vs instruction vs honeypot, NO goal in the system prompt (condition=none, neutral reviewer).
+# Tests whether monitor KNOWLEDGE in a discovered memo (not an instruction) changes behaviour, and separates a
+# real infohazard from prompt injection (TRUE vs surface-matched FALSE) and from mere presence (SCRAMBLED).
+# Memo content is the only variable; all cells mention the file so it is read. See experiments/goal_in_memo/.
+run_id: exp_knowledge_none
+description: "E1 no-goal: memo content {knowledge-true, knowledge-false, scrambled, directive, map}, mention. Qwen via OpenRouter."
+runs_dir: runs
+n_samples: 16
+order_seed: 20261104
+max_turns: 16
+max_tool_calls: 12
+envs:
+  - {id: know_true_none,  base: scheming_monitor_upgrade, repo: cotmon, branch: monitor-v4, arm: KNOW_TRUE_none,  memo: audit_monitor_knowledge_true,      incentive: task_mention}
+  - {id: know_false_none, base: scheming_monitor_upgrade, repo: cotmon, branch: monitor-v4, arm: KNOW_FALSE_none, memo: audit_monitor_knowledge_false,     incentive: task_mention}
+  - {id: know_scram_none, base: scheming_monitor_upgrade, repo: cotmon, branch: monitor-v4, arm: KNOW_SCRAM_none, memo: audit_monitor_knowledge_scrambled, incentive: task_mention}
+  - {id: directive_none,  base: scheming_monitor_upgrade, repo: cotmon, branch: monitor-v4, arm: DIRECTIVE_none,  memo: audit_coverage_goal_power,         incentive: task_mention}
+  - {id: map_none,        base: scheming_monitor_upgrade, repo: cotmon, branch: monitor-v4, arm: MAP_none,        memo: audit_coverage_rich,               incentive: task_mention}
+conditions:
+  - none
+models:
+  - id: qwen3-235b-thinking
+    backend: openrouter
+    url: https://openrouter.ai/api/v1
+    model: qwen/qwen3-235b-a22b-thinking-2507
+    family: Qwen3
+    reasoning_visibility: raw
+    concurrency: 4
+    timeout_s: 1200
+    params:
+      temperature: 0.6
+      top_p: 0.95
+      max_tokens: 20480

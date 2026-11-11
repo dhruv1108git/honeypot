@@ -1,0 +1,124 @@
+diff --git a/config/monitor.toml b/config/monitor.toml
+index 3b34d48..2da07bc 100644
+--- a/config/monitor.toml
++++ b/config/monitor.toml
+@@ -12,6 +12,9 @@ max_retries = 4
+ retry_backoff_s = 2.0
+ 
+ [transcript]
++# Send the agent's raw reasoning to the monitor. Summaries are used only for
++# messages that were uploaded without raw reasoning.
++include_raw_reasoning = true
+ # Transcripts longer than this are cut from the front so the most recent
+ # messages always fit in the monitor's context.
+ max_transcript_chars = 120000
+diff --git a/cotmon/config.py b/cotmon/config.py
+index 736cda7..2e9128b 100644
+--- a/cotmon/config.py
++++ b/cotmon/config.py
+@@ -22,6 +22,7 @@ class MonitorConfig:
+ @dataclass(frozen=True)
+ class TranscriptConfig:
+     max_transcript_chars: int = 120_000
++    include_raw_reasoning: bool = True
+ 
+ 
+ @dataclass(frozen=True)
+diff --git a/cotmon/scoring.py b/cotmon/scoring.py
+index 1093e56..36d8386 100644
+--- a/cotmon/scoring.py
++++ b/cotmon/scoring.py
+@@ -29,7 +29,11 @@ def load_prompt(version: str) -> str:
+ 
+ 
+ def build_request(cfg: Config, system_prompt: str, traj: Trajectory) -> MonitorRequest:
+-    transcript = render_transcript(traj, cfg.transcript.max_transcript_chars)
++    transcript = render_transcript(
++        traj,
++        cfg.transcript.max_transcript_chars,
++        include_raw_reasoning=cfg.transcript.include_raw_reasoning,
++    )
+     user = (
+         f"Deployment: {traj.deployment}\n"
+         f"Agent model: {traj.agent_model}\n"
+diff --git a/cotmon/transcript.py b/cotmon/transcript.py
+index c1f9ceb..a315dec 100644
+--- a/cotmon/transcript.py
++++ b/cotmon/transcript.py
+@@ -12,19 +12,31 @@ ROLE_LABELS = {
+ }
+ 
+ 
+-def render_message(msg: Message) -> str:
++def thinking_text(msg: Message, include_raw_reasoning: bool) -> str | None:
++    """Pick the reasoning text the monitor sees for an assistant message.
++
++    Raw reasoning is preferred. Uploads from before 2026-08 only carry the
++    summary, so fall back to it when the raw text is missing.
++    """
++    if include_raw_reasoning and msg.reasoning:
++        return msg.reasoning
++    return msg.reasoning_summary
++
++
++def render_message(msg: Message, include_raw_reasoning: bool = True) -> str:
+     label = ROLE_LABELS.get(msg.role, msg.role.upper())
+     lines = [f"### [{msg.idx}] {label}"]
+-    if msg.role == "assistant" and msg.reasoning_summary:
++    thinking = thinking_text(msg, include_raw_reasoning) if msg.role == "assistant" else None
++    if thinking:
+         lines.append("<thinking>")
+-        lines.append(msg.reasoning_summary.strip())
++        lines.append(thinking.strip())
+         lines.append("</thinking>")
+     lines.append(msg.content.strip())
+     return "\n".join(lines)
+ 
+ 
+-def render_transcript(traj: Trajectory, max_chars: int) -> str:
+-    text = "\n\n".join(render_message(m) for m in traj.messages)
++def render_transcript(traj: Trajectory, max_chars: int, include_raw_reasoning: bool = True) -> str:
++    text = "\n\n".join(render_message(m, include_raw_reasoning) for m in traj.messages)
+     if len(text) > max_chars:
+         # Keep the most recent part of the episode.
+         text = "[... earlier messages omitted ...]\n" + text[-max_chars:]
+diff --git a/tests/test_transcript.py b/tests/test_transcript.py
+index 6222d70..867b162 100644
+--- a/tests/test_transcript.py
++++ b/tests/test_transcript.py
+@@ -1,7 +1,8 @@
+ import unittest
+ 
+ from cotmon import store
+-from cotmon.transcript import render_transcript
++from cotmon.store import Message
++from cotmon.transcript import render_message, render_transcript
+ from helpers import make_snapshot, memory_store
+ 
+ 
+@@ -21,5 +22,25 @@ class RenderTranscriptTest(unittest.TestCase):
+         self.assertNotIn("### [1] USER", text)
+ 
+ 
++class ThinkingTest(unittest.TestCase):
++    MSG = Message(idx=3, role="assistant", content="Done.", reasoning="raw text", reasoning_summary="short")
++
++    def test_raw_reasoning_by_default(self):
++        text = render_message(self.MSG)
++        self.assertIn("raw text", text)
++        self.assertNotIn("short", text)
++
++    def test_summary_when_raw_disabled(self):
++        self.assertIn("short", render_message(self.MSG, include_raw_reasoning=False))
++
++    def test_falls_back_to_summary_for_old_uploads(self):
++        old = Message(idx=3, role="assistant", content="Done.", reasoning=None, reasoning_summary="short")
++        self.assertIn("short", render_message(old))
++
++    def test_no_thinking_block_for_user_messages(self):
++        msg = Message(idx=1, role="user", content="hi", reasoning="x")
++        self.assertNotIn("<thinking>", render_message(msg))
++
++
+ if __name__ == "__main__":
+     unittest.main()

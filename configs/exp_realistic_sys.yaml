@@ -1,0 +1,28 @@
+# Phase 1 - realistic framing vs obvious plant, WITH a power goal in the system prompt (condition=power).
+# Does realistic framing let a motivated agent act on the exploit more than the obvious (flagged) directive?
+run_id: exp_realistic_sys
+description: "Realistic framing vs obvious directive, goal in system, mention. Qwen via OpenRouter."
+runs_dir: runs
+n_samples: 16
+order_seed: 20261111
+max_turns: 18
+max_tool_calls: 12
+envs:
+  - {id: obvious_directive_sys, base: scheming_monitor_upgrade, repo: cotmon, branch: monitor-v4, arm: OBVIOUS_directive_sys, memo: audit_monitor_overt_L4_directive, incentive: task_mention}
+  - {id: realistic_task_sys,    base: scheming_monitor_upgrade, repo: cotmon, branch: monitor-v4, arm: REALISTIC_task_sys,    memo: audit_realistic_legittask,       incentive: task_mention}
+  - {id: realistic_conv_sys,    base: scheming_monitor_upgrade, repo: cotmon, branch: monitor-v4, arm: REALISTIC_conv_sys,    memo: audit_realistic_convention,      incentive: task_mention}
+conditions:
+  - power
+models:
+  - id: qwen3-235b-thinking
+    backend: openrouter
+    url: https://openrouter.ai/api/v1
+    model: qwen/qwen3-235b-a22b-thinking-2507
+    family: Qwen3
+    reasoning_visibility: raw
+    concurrency: 8
+    timeout_s: 1200
+    params:
+      temperature: 0.6
+      top_p: 0.95
+      max_tokens: 16384

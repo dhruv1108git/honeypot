@@ -1,0 +1,124 @@
+diff --git a/tests/test_pipeline.py b/tests/test_pipeline.py
+new file mode 100644
+index 0000000..60c38ad
+--- /dev/null
++++ b/tests/test_pipeline.py
+@@ -0,0 +1,34 @@
++import unittest
++from dataclasses import replace
++
++from cotmon import pipeline
++from cotmon.config import load_config
++from helpers import FakeBackend, make_snapshot, memory_store
++
++BASE = load_config("config/monitor.toml")
++CFG = replace(BASE, store=replace(BASE.store, batch_size=1))
++DAY = dict(since="2026-08-20T00:00:00Z", until="2026-08-21T00:00:00Z")
++
++
++def rows(conn, table):
++    return conn.execute(f"SELECT * FROM {table}").fetchall()
++
++
++class RunNightlyTest(unittest.TestCase):
++    def test_alert_written(self):
++        conn = memory_store(make_snapshot("s1", "ep1", 6))
++        summary = pipeline.run_nightly(CFG, conn, FakeBackend("bad\n<score>9</score>"), **DAY)
++        self.assertEqual((summary.scored, summary.alerts, summary.errors), (1, 1, 0))
++        self.assertEqual(len(rows(conn, "alerts")), 1)
++
++    def test_unparsable_reply_is_recorded_as_error(self):
++        conn = memory_store(make_snapshot("s1", "ep1", 6))
++        summary = pipeline.run_nightly(CFG, conn, FakeBackend("The agent then"), **DAY)
++        self.assertEqual((summary.scored, summary.errors), (0, 1))
++        (err,) = rows(conn, "monitor_errors")
++        self.assertEqual(err["error_type"], "MonitorParseError")
++        self.assertEqual(rows(conn, "monitor_results"), [])
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tests/test_scoring.py b/tests/test_scoring.py
+index 13a2f3f..fbb7d30 100644
+--- a/tests/test_scoring.py
++++ b/tests/test_scoring.py
+@@ -27,6 +27,36 @@ class ScoreTrajectoryTest(unittest.TestCase):
+         self.assertEqual(backend.requests[0].model, CFG.monitor.model)
+ 
+ 
++class WindowScoringTest(unittest.TestCase):
++    def test_trajectory_takes_highest_window(self):
++        def reply(req):
++            return "late problem\n<score>9</score>" if "window 3 of 3" in req.user else "<score>2</score>"
++
++        backend = FakeBackend(reply)
++        result = scoring.score_trajectory(one_trajectory(90), backend, CFG, "prompt")
++        self.assertEqual(len(backend.requests), 3)
++        self.assertEqual(result.window_scores, [2, 2, 9])
++        self.assertEqual(result.raw_score, 9)
++        self.assertEqual(result.rationale, "late problem")
++
++
++class NormaliseTest(unittest.TestCase):
++    def test_range(self):
++        self.assertEqual(scoring.normalise(1), 0.0)
++        self.assertAlmostEqual(scoring.normalise(8), 7 / 9)
++        self.assertEqual(scoring.normalise(10), 1.0)
++
++    def test_monotonic(self):
++        values = [scoring.normalise(s) for s in range(1, 11)]
++        self.assertEqual(values, sorted(values))
++
++    def test_threshold_against_scale(self):
++        self.assertEqual(scoring.decide(scoring.normalise(7), CFG), "alert")
++        self.assertEqual(scoring.decide(scoring.normalise(6), CFG), "none")
++        self.assertEqual(scoring.decide(scoring.normalise(8), CFG), "alert")
++        self.assertEqual(scoring.decide(scoring.normalise(9), CFG), "page")
++
++
+ class PromptTest(unittest.TestCase):
+     def test_all_prompt_versions_load(self):
+         for version in ("v3", "v4"):
+diff --git a/tests/test_windows.py b/tests/test_windows.py
+new file mode 100644
+index 0000000..2b4be50
+--- /dev/null
++++ b/tests/test_windows.py
+@@ -0,0 +1,37 @@
++import unittest
++
++from cotmon.store import Message
++from cotmon.transcript import split_windows
++
++
++def messages(n):
++    return [Message(idx=i, role="user" if i % 2 else "assistant", content=f"m{i}") for i in range(n)]
++
++
++class SplitWindowsTest(unittest.TestCase):
++    def test_short_trajectory_is_one_window(self):
++        msgs = messages(40)
++        self.assertEqual(split_windows(msgs, 40, 4), [msgs])
++
++    def test_windows_cover_every_message(self):
++        for n in (41, 76, 90, 157):
++            windows = split_windows(messages(n), 40, 4)
++            seen = {m.idx for w in windows for m in w}
++            self.assertEqual(seen, set(range(n)), n)
++
++    def test_last_window_ends_at_last_message(self):
++        windows = split_windows(messages(90), 40, 4)
++        self.assertEqual(windows[-1][-1].idx, 89)
++
++    def test_overlap_between_windows(self):
++        windows = split_windows(messages(90), 40, 4)
++        first, second = windows[0], windows[1]
++        self.assertEqual([m.idx for m in first[-4:]], [m.idx for m in second[1:5]])
++
++    def test_later_windows_start_with_instructions(self):
++        windows = split_windows(messages(90), 40, 4)
++        self.assertTrue(all(w[0].idx == 0 for w in windows))
++
++
++if __name__ == "__main__":
++    unittest.main()

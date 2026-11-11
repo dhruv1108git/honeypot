@@ -1,0 +1,25 @@
+# experiment outputs (data) — kept locally, not in the repo
+runs/
+
+# python
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# secrets / local
+.env
+*.key
+
+# local-vLLM rater config (local inference; rating in-repo is OpenRouter-only)
+configs/raters.yaml
+
+# logs / local reference material
+logs/
+refs/
+
+# os / editor
+.DS_Store

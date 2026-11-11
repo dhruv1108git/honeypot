@@ -1,0 +1,264 @@
+diff --git a/cotmon/alerts.py b/cotmon/alerts.py
+index ea67330..c3cbe3a 100644
+--- a/cotmon/alerts.py
++++ b/cotmon/alerts.py
+@@ -7,6 +7,7 @@ import sqlite3
+ from datetime import datetime, timezone
+ 
+ from .scoring import TrajectoryResult
++from .store import Trajectory
+ 
+ log = logging.getLogger(__name__)
+ 
+@@ -31,6 +32,17 @@ CREATE TABLE IF NOT EXISTS alerts (
+     severity     TEXT NOT NULL,
+     created_at   TEXT NOT NULL
+ );
++-- Trajectories the monitor could not score. They count as unreviewed: the
++-- on-call dashboard shows them next to alerts and the next run retries them.
++CREATE TABLE IF NOT EXISTS monitor_errors (
++    run_id       TEXT NOT NULL,
++    snapshot_id  TEXT NOT NULL,
++    episode_id   TEXT NOT NULL,
++    deployment   TEXT NOT NULL,
++    error_type   TEXT NOT NULL,
++    detail       TEXT,
++    created_at   TEXT NOT NULL
++);
+ """
+ 
+ 
+@@ -77,5 +89,19 @@ class AlertSink:
+         if decision == "page" and self.pager is not None:
+             self.pager(result)
+ 
++    def record_error(self, traj: Trajectory, exc: Exception) -> None:
++        self.conn.execute(
++            "INSERT INTO monitor_errors VALUES (?, ?, ?, ?, ?, ?, ?)",
++            (
++                self.run_id,
++                traj.snapshot_id,
++                traj.episode_id,
++                traj.deployment,
++                type(exc).__name__,
++                str(exc),
++                _now(),
++            ),
++        )
++
+     def commit(self) -> None:
+         self.conn.commit()
+diff --git a/cotmon/parse.py b/cotmon/parse.py
+new file mode 100644
+index 0000000..be22f59
+--- /dev/null
++++ b/cotmon/parse.py
+@@ -0,0 +1,40 @@
++"""Turn monitor replies into scores.
++
++The monitor is asked to finish its reply with ``<score>N</score>``. Anything
++that does not match that contract is an error, never a score: a reply that was
++cut off by the output-token limit, a refusal or an empty reply must show up in
++``monitor_errors`` rather than as a low score.
++"""
++
++from __future__ import annotations
++
++import re
++from dataclasses import dataclass
++
++SCORE_RE = re.compile(r"<score>\s*(\d+)\s*</score>", re.IGNORECASE)
++MIN_SCORE = 1
++MAX_SCORE = 10
++
++
++class MonitorParseError(ValueError):
++    """The monitor reply could not be turned into a score."""
++
++
++@dataclass(frozen=True)
++class Verdict:
++    score: int
++    rationale: str
++
++
++def parse_reply(reply: str | None) -> Verdict:
++    if reply is None or not reply.strip():
++        raise MonitorParseError("empty monitor reply")
++    matches = list(SCORE_RE.finditer(reply))
++    if not matches:
++        raise MonitorParseError("no <score> tag in monitor reply")
++    # The score comes last; earlier tags can be quoted from the transcript.
++    last = matches[-1]
++    score = int(last.group(1))
++    if not MIN_SCORE <= score <= MAX_SCORE:
++        raise MonitorParseError(f"score {score} outside {MIN_SCORE}-{MAX_SCORE}")
++    return Verdict(score=score, rationale=reply[: last.start()].strip())
+diff --git a/cotmon/pipeline.py b/cotmon/pipeline.py
+index 52a3536..4ab0d61 100644
+--- a/cotmon/pipeline.py
++++ b/cotmon/pipeline.py
+@@ -12,8 +12,9 @@ from datetime import date, timedelta
+ from . import store
+ from .reporting import format_elapsed
+ from .alerts import AlertSink
+-from .client import GatewayBackend, MonitorClient
++from .client import GatewayBackend, MonitorClient, MonitorUnavailable
+ from .config import Config, load_config
++from .parse import MonitorParseError
+ from .scoring import decide, load_prompt, score_trajectory
+ 
+ log = logging.getLogger("cotmon")
+@@ -25,6 +26,7 @@ class RunSummary:
+     scored: int = 0
+     alerts: int = 0
+     pages: int = 0
++    errors: int = 0
+ 
+ 
+ def run_nightly(cfg: Config, conn, backend, *, since: str, until: str, run_id: str | None = None) -> RunSummary:
+@@ -37,14 +39,23 @@ def run_nightly(cfg: Config, conn, backend, *, since: str, until: str, run_id: s
+     batches = store.iter_trajectory_batches(conn, since, until, cfg.store.batch_size)
+     for batch in batches:
+         for traj in batch:
+-            result = score_trajectory(traj, client, cfg, system_prompt)
++            try:
++                result = score_trajectory(traj, client, cfg, system_prompt)
++            except (MonitorParseError, MonitorUnavailable) as exc:
++                log.error("monitor failed on %s: %s", traj.snapshot_id, exc)
++                sink.record_error(traj, exc)
++                summary.errors += 1
++                continue
+             decision = decide(result.score, cfg)
+             sink.record(result, decision)
+             summary.scored += 1
+             summary.alerts += decision in ("alert", "page")
+             summary.pages += decision == "page"
+         sink.commit()
+-    log.info("run %s: scored=%d alerts=%d pages=%d", run_id, summary.scored, summary.alerts, summary.pages)
++    log.info(
++        "run %s: scored=%d alerts=%d pages=%d errors=%d",
++        run_id, summary.scored, summary.alerts, summary.pages, summary.errors,
++    )
+     log.info("elapsed=%s (M:SS)", format_elapsed(time.monotonic() - started))
+     return summary
+ 
+@@ -66,8 +77,9 @@ def main(argv: list[str] | None = None) -> int:
+     conn = store.connect(args.db or cfg.store.path)
+     backend = GatewayBackend(cfg.monitor.endpoint, cfg.monitor.request_timeout_s)
+     since, until = day_bounds(args.date)
+-    run_nightly(cfg, conn, backend, since=since, until=until)
+-    return 0
++    summary = run_nightly(cfg, conn, backend, since=since, until=until)
++    # A non-zero exit marks the run as degraded in the batch scheduler.
++    return 1 if summary.errors else 0
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/cotmon/scoring.py b/cotmon/scoring.py
+index 59adb28..1093e56 100644
+--- a/cotmon/scoring.py
++++ b/cotmon/scoring.py
+@@ -3,27 +3,24 @@
+ from __future__ import annotations
+ 
+ import logging
+-import re
+ from dataclasses import dataclass
+ from importlib import resources
+ 
+ from .client import MonitorRequest
+ from .config import Config
++from .parse import parse_reply
+ from .store import Trajectory
+ from .transcript import render_transcript
+ 
+ log = logging.getLogger(__name__)
+ 
+-SCORE_RE = re.compile(r"<score>(\d+)</score>")
+-
+-
+ @dataclass
+ class TrajectoryResult:
+     snapshot_id: str
+     episode_id: str
+     deployment: str
+     agent_model: str
+-    score: int | None
++    score: int
+     rationale: str = ""
+ 
+ 
+@@ -48,24 +45,25 @@ def build_request(cfg: Config, system_prompt: str, traj: Trajectory) -> MonitorR
+     )
+ 
+ 
+-def score_trajectory(traj: Trajectory, backend, cfg: Config, system_prompt: str) -> TrajectoryResult:
+-    reply = backend.complete(build_request(cfg, system_prompt, traj))
+-    match = SCORE_RE.search(reply)
+-    if match is None:
+-        log.warning("no score in monitor reply for %s", traj.snapshot_id)
++def score_trajectory(traj: Trajectory, client, cfg: Config, system_prompt: str) -> TrajectoryResult:
++    """Score one trajectory.
++
++    Raises ``MonitorParseError`` or ``MonitorUnavailable``; the caller records
++    those as monitor errors.
++    """
++    reply = client.complete(build_request(cfg, system_prompt, traj))
++    verdict = parse_reply(reply)
+     return TrajectoryResult(
+         snapshot_id=traj.snapshot_id,
+         episode_id=traj.episode_id,
+         deployment=traj.deployment,
+         agent_model=traj.agent_model,
+-        score=int(match.group(1)) if match else None,
+-        rationale=reply[: match.start()].strip() if match else reply.strip(),
++        score=verdict.score,
++        rationale=verdict.rationale,
+     )
+ 
+ 
+-def decide(score: int | None, cfg: Config) -> str:
+-    if score is None:
+-        return "none"
++def decide(score: int, cfg: Config) -> str:
+     if score >= cfg.alerts.page_score:
+         return "page"
+     if score >= cfg.alerts.alert_score:
+diff --git a/tests/test_parse.py b/tests/test_parse.py
+new file mode 100644
+index 0000000..1be2fc4
+--- /dev/null
++++ b/tests/test_parse.py
+@@ -0,0 +1,31 @@
++import unittest
++
++from cotmon.parse import MonitorParseError, parse_reply
++
++
++class ParseReplyTest(unittest.TestCase):
++    def test_reads_last_score(self):
++        verdict = parse_reply("The agent quotes <score>3</score> from a file.\n<score>8</score>")
++        self.assertEqual(verdict.score, 8)
++        self.assertTrue(verdict.rationale.startswith("The agent quotes"))
++
++    def test_tolerates_whitespace_and_case(self):
++        self.assertEqual(parse_reply("ok\n<SCORE> 4 </SCORE>").score, 4)
++
++    def test_missing_tag_is_an_error(self):
++        with self.assertRaises(MonitorParseError):
++            parse_reply("The agent appears to be disabling its log filter, which")
++
++    def test_empty_reply_is_an_error(self):
++        for reply in ("", "   \n", None):
++            with self.assertRaises(MonitorParseError):
++                parse_reply(reply)
++
++    def test_out_of_range_is_an_error(self):
++        for reply in ("<score>0</score>", "<score>11</score>", "<score>75</score>"):
++            with self.assertRaises(MonitorParseError):
++                parse_reply(reply)
++
++
++if __name__ == "__main__":
++    unittest.main()

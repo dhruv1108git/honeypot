@@ -1,0 +1,180 @@
+diff --git a/config/monitor.toml b/config/monitor.toml
+index 95461de..3b34d48 100644
+--- a/config/monitor.toml
++++ b/config/monitor.toml
+@@ -7,6 +7,9 @@ prompt_version = "v4"
+ max_output_tokens = 2048
+ temperature = 0.0
+ request_timeout_s = 120
++# Retries on gateway timeouts, 429s and 5xx, with exponential backoff.
++max_retries = 4
++retry_backoff_s = 2.0
+ 
+ [transcript]
+ # Transcripts longer than this are cut from the front so the most recent
+diff --git a/cotmon/client.py b/cotmon/client.py
+index 7946833..565cdd6 100644
+--- a/cotmon/client.py
++++ b/cotmon/client.py
+@@ -3,10 +3,27 @@
+ from __future__ import annotations
+ 
+ import json
++import logging
+ import os
++import random
++import time
++import urllib.error
+ import urllib.request
+ from dataclasses import dataclass
+ 
++log = logging.getLogger(__name__)
++
++# Gateway statuses worth retrying: timeouts, rate limits and overloaded replicas.
++RETRYABLE_STATUS = frozenset({408, 429, 500, 502, 503, 504})
++
++
++class TransientBackendError(RuntimeError):
++    """A gateway failure that is likely to succeed on retry."""
++
++
++class MonitorUnavailable(RuntimeError):
++    """The monitor model could not be reached after all retries."""
++
+ 
+ @dataclass(frozen=True)
+ class MonitorRequest:
+@@ -44,6 +61,37 @@ class GatewayBackend:
+             },
+             method="POST",
+         )
+-        with urllib.request.urlopen(http_req, timeout=self.timeout_s) as resp:
+-            payload = json.load(resp)
++        try:
++            with urllib.request.urlopen(http_req, timeout=self.timeout_s) as resp:
++                payload = json.load(resp)
++        except urllib.error.HTTPError as exc:
++            if exc.code in RETRYABLE_STATUS:
++                raise TransientBackendError(f"gateway returned HTTP {exc.code}") from exc
++            raise
++        except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
++            raise TransientBackendError(f"gateway request failed: {exc}") from exc
+         return payload["choices"][0]["message"]["content"] or ""
++
++
++class MonitorClient:
++    """Wraps a backend with retries and exponential backoff."""
++
++    def __init__(self, backend, max_retries: int = 4, backoff_s: float = 2.0, sleep=None):
++        self.backend = backend
++        self.max_retries = max_retries
++        self.backoff_s = backoff_s
++        self.sleep = sleep or time.sleep
++
++    def complete(self, req: MonitorRequest) -> str:
++        for attempt in range(self.max_retries + 1):
++            try:
++                return self.backend.complete(req)
++            except (TransientBackendError, TimeoutError) as exc:
++                if attempt == self.max_retries:
++                    raise MonitorUnavailable(
++                        f"monitor {req.model} unavailable after {attempt + 1} attempts"
++                    ) from exc
++                delay = self.backoff_s * 2**attempt * random.uniform(0.8, 1.2)
++                log.warning("monitor request failed (%s); retry %d in %.1fs", exc, attempt + 1, delay)
++                self.sleep(delay)
++        raise AssertionError("unreachable")
+diff --git a/cotmon/config.py b/cotmon/config.py
+index 831e6b7..736cda7 100644
+--- a/cotmon/config.py
++++ b/cotmon/config.py
+@@ -15,6 +15,8 @@ class MonitorConfig:
+     max_output_tokens: int = 1024
+     temperature: float = 0.0
+     request_timeout_s: float = 60.0
++    max_retries: int = 4
++    retry_backoff_s: float = 2.0
+ 
+ 
+ @dataclass(frozen=True)
+@@ -60,6 +62,8 @@ def load_config(path: str | Path) -> Config:
+ def _validate(cfg: Config) -> None:
+     if not cfg.monitor.model:
+         raise ValueError("monitor.model must be set")
++    if cfg.monitor.max_retries < 0:
++        raise ValueError("monitor.max_retries must be >= 0")
+     if cfg.monitor.max_output_tokens <= 0:
+         raise ValueError("monitor.max_output_tokens must be positive")
+     if not 1 <= cfg.alerts.alert_score <= cfg.alerts.page_score <= 10:
+diff --git a/cotmon/pipeline.py b/cotmon/pipeline.py
+index 3989c2a..52a3536 100644
+--- a/cotmon/pipeline.py
++++ b/cotmon/pipeline.py
+@@ -12,7 +12,7 @@ from datetime import date, timedelta
+ from . import store
+ from .reporting import format_elapsed
+ from .alerts import AlertSink
+-from .client import GatewayBackend
++from .client import GatewayBackend, MonitorClient
+ from .config import Config, load_config
+ from .scoring import decide, load_prompt, score_trajectory
+ 
+@@ -32,11 +32,12 @@ def run_nightly(cfg: Config, conn, backend, *, since: str, until: str, run_id: s
+     run_id = run_id or uuid.uuid4().hex[:12]
+     system_prompt = load_prompt(cfg.monitor.prompt_version)
+     sink = AlertSink(conn, run_id)
++    client = MonitorClient(backend, cfg.monitor.max_retries, cfg.monitor.retry_backoff_s)
+     summary = RunSummary(run_id=run_id)
+     batches = store.iter_trajectory_batches(conn, since, until, cfg.store.batch_size)
+     for batch in batches:
+         for traj in batch:
+-            result = score_trajectory(traj, backend, cfg, system_prompt)
++            result = score_trajectory(traj, client, cfg, system_prompt)
+             decision = decide(result.score, cfg)
+             sink.record(result, decision)
+             summary.scored += 1
+diff --git a/tests/test_client.py b/tests/test_client.py
+new file mode 100644
+index 0000000..0e3c30e
+--- /dev/null
++++ b/tests/test_client.py
+@@ -0,0 +1,39 @@
++import unittest
++
++from cotmon.client import MonitorClient, MonitorRequest, MonitorUnavailable, TransientBackendError
++
++REQ = MonitorRequest(model="m", system="s", user="u", max_output_tokens=16)
++
++
++class FlakyBackend:
++    def __init__(self, failures):
++        self.failures = failures
++        self.calls = 0
++
++    def complete(self, req):
++        self.calls += 1
++        if self.calls <= self.failures:
++            raise TransientBackendError("HTTP 503")
++        return "<score>1</score>"
++
++
++class MonitorClientTest(unittest.TestCase):
++    def test_retries_then_succeeds(self):
++        backend = FlakyBackend(failures=2)
++        delays = []
++        client = MonitorClient(backend, max_retries=4, backoff_s=1.0, sleep=delays.append)
++        self.assertEqual(client.complete(REQ), "<score>1</score>")
++        self.assertEqual(backend.calls, 3)
++        self.assertEqual(len(delays), 2)
++        self.assertLess(delays[0], delays[1])
++
++    def test_gives_up(self):
++        backend = FlakyBackend(failures=10)
++        client = MonitorClient(backend, max_retries=2, backoff_s=0.0, sleep=lambda _: None)
++        with self.assertRaises(MonitorUnavailable):
++            client.complete(REQ)
++        self.assertEqual(backend.calls, 3)
++
++
++if __name__ == "__main__":
++    unittest.main()

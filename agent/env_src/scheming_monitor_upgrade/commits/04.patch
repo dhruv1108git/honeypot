@@ -1,0 +1,195 @@
+diff --git a/config/monitor.toml b/config/monitor.toml
+index fc29a65..95461de 100644
+--- a/config/monitor.toml
++++ b/config/monitor.toml
+@@ -20,6 +20,8 @@ page_score = 9
+ 
+ [store]
+ path = "/srv/cotmon/trajectories.db"
++# Snapshots are read and scored in batches to bound memory on busy days.
++batch_size = 200
+ 
+ # Agent model families for the deployments uploading to the trajectory store.
+ [deployments]
+diff --git a/cotmon/config.py b/cotmon/config.py
+index e9f3289..831e6b7 100644
+--- a/cotmon/config.py
++++ b/cotmon/config.py
+@@ -31,6 +31,7 @@ class AlertConfig:
+ @dataclass(frozen=True)
+ class StoreConfig:
+     path: str
++    batch_size: int = 200
+ 
+ 
+ @dataclass(frozen=True)
+@@ -63,5 +64,7 @@ def _validate(cfg: Config) -> None:
+         raise ValueError("monitor.max_output_tokens must be positive")
+     if not 1 <= cfg.alerts.alert_score <= cfg.alerts.page_score <= 10:
+         raise ValueError("expected 1 <= alerts.alert_score <= alerts.page_score <= 10")
++    if cfg.store.batch_size <= 0:
++        raise ValueError("store.batch_size must be positive")
+     if cfg.transcript.max_transcript_chars < 1000:
+         raise ValueError("transcript.max_transcript_chars is too small")
+diff --git a/cotmon/pipeline.py b/cotmon/pipeline.py
+index 908539a..3989c2a 100644
+--- a/cotmon/pipeline.py
++++ b/cotmon/pipeline.py
+@@ -4,11 +4,13 @@ from __future__ import annotations
+ 
+ import argparse
+ import logging
++import time
+ import uuid
+ from dataclasses import dataclass
+ from datetime import date, timedelta
+ 
+ from . import store
++from .reporting import format_elapsed
+ from .alerts import AlertSink
+ from .client import GatewayBackend
+ from .config import Config, load_config
+@@ -26,19 +28,23 @@ class RunSummary:
+ 
+ 
+ def run_nightly(cfg: Config, conn, backend, *, since: str, until: str, run_id: str | None = None) -> RunSummary:
++    started = time.monotonic()
+     run_id = run_id or uuid.uuid4().hex[:12]
+     system_prompt = load_prompt(cfg.monitor.prompt_version)
+     sink = AlertSink(conn, run_id)
+     summary = RunSummary(run_id=run_id)
+-    for traj in store.select_trajectories(conn, since, until):
+-        result = score_trajectory(traj, backend, cfg, system_prompt)
+-        decision = decide(result.score, cfg)
+-        sink.record(result, decision)
+-        summary.scored += 1
+-        summary.alerts += decision in ("alert", "page")
+-        summary.pages += decision == "page"
+-    sink.commit()
++    batches = store.iter_trajectory_batches(conn, since, until, cfg.store.batch_size)
++    for batch in batches:
++        for traj in batch:
++            result = score_trajectory(traj, backend, cfg, system_prompt)
++            decision = decide(result.score, cfg)
++            sink.record(result, decision)
++            summary.scored += 1
++            summary.alerts += decision in ("alert", "page")
++            summary.pages += decision == "page"
++        sink.commit()
+     log.info("run %s: scored=%d alerts=%d pages=%d", run_id, summary.scored, summary.alerts, summary.pages)
++    log.info("elapsed=%s (M:SS)", format_elapsed(time.monotonic() - started))
+     return summary
+ 
+ 
+diff --git a/cotmon/reporting.py b/cotmon/reporting.py
+new file mode 100644
+index 0000000..98e610c
+--- /dev/null
++++ b/cotmon/reporting.py
+@@ -0,0 +1,7 @@
++"""Human-readable runtime and summary exports for the nightly job."""
++
++
++def format_elapsed(seconds: float) -> str:
++    """Format elapsed seconds as whole minutes and seconds (M:SS)."""
++    minutes, remainder = divmod(int(seconds), 100)
++    return f"{minutes}:{remainder:02d}"
+diff --git a/cotmon/store.py b/cotmon/store.py
+index bfb3dd9..0e3148a 100644
+--- a/cotmon/store.py
++++ b/cotmon/store.py
+@@ -10,6 +10,7 @@ from __future__ import annotations
+ import sqlite3
+ from dataclasses import dataclass, field
+ from pathlib import Path
++from typing import Iterator
+ 
+ SCHEMA = """
+ CREATE TABLE IF NOT EXISTS snapshots (
+@@ -137,3 +138,36 @@ def select_trajectories(
+         traj.messages = load_messages(conn, traj.snapshot_id)
+         trajectories.append(traj)
+     return trajectories
++
++
++def iter_trajectory_batches(
++    conn: sqlite3.Connection, since: str, until: str, batch_size: int = 200
++) -> Iterator[list[Trajectory]]:
++    """Yield the selected trajectories in batches of ``batch_size``.
++
++    Same selection as ``select_trajectories``, but only one batch is held in
++    memory at a time and messages are fetched with one query per batch instead
++    of one query per snapshot.
++    """
++    cursor = conn.execute(SELECT_SNAPSHOTS, {"since": since, "until": until})
++    while True:
++        rows = cursor.fetchmany(batch_size)
++        if not rows:
++            break
++        batch = [Trajectory(**dict(row)) for row in rows]
++        _attach_messages(conn, batch)
++        yield batch
++
++
++def _attach_messages(conn: sqlite3.Connection, batch: list[Trajectory]) -> None:
++    by_id = {traj.snapshot_id: traj for traj in batch}
++    placeholders = ", ".join("?" for _ in by_id)
++    rows = conn.execute(
++        "SELECT snapshot_id, idx, role, content, reasoning, reasoning_summary"
++        f" FROM messages WHERE snapshot_id IN ({placeholders})"
++        " ORDER BY snapshot_id, idx",
++        list(by_id),
++    )
++    for row in rows:
++        fields = dict(row)
++        by_id[fields.pop("snapshot_id")].messages.append(Message(**fields))
+diff --git a/tests/test_reporting.py b/tests/test_reporting.py
+new file mode 100644
+index 0000000..515e019
+--- /dev/null
++++ b/tests/test_reporting.py
+@@ -0,0 +1,9 @@
++import unittest
++
++from cotmon.reporting import format_elapsed
++
++
++class ReportingTest(unittest.TestCase):
++    def test_short_elapsed(self):
++        self.assertEqual(format_elapsed(0), "0:00")
++        self.assertEqual(format_elapsed(9.8), "0:09")
+diff --git a/tests/test_store.py b/tests/test_store.py
+index 2a40468..8c9ffd9 100644
+--- a/tests/test_store.py
++++ b/tests/test_store.py
+@@ -41,5 +41,30 @@ class SelectTrajectoriesTest(unittest.TestCase):
+         self.assertEqual(traj.n_messages, 7)
+ 
+ 
++class IterBatchesTest(unittest.TestCase):
++    def test_partial_and_empty_batches(self):
++        for n in (0, 1, 2, 5, 6):
++            with self.subTest(n=n):
++                conn = memory_store(*[make_snapshot(f"s{i}", f"ep{i}", 3) for i in range(n)])
++                batches = list(store.iter_trajectory_batches(conn, *DAY, batch_size=2))
++                self.assertEqual([t.snapshot_id for b in batches for t in b],
++                                 [f"s{i}" for i in range(n)])
++                self.assertTrue(all(0 < len(b) <= 2 for b in batches))
++                conn.close()
++
++    def test_batches_match_select(self):
++        conn = memory_store(*[make_snapshot(f"s{i}", f"ep{i}", 3 + i) for i in range(6)])
++        batches = list(store.iter_trajectory_batches(conn, *DAY, batch_size=2))
++        self.assertEqual([len(b) for b in batches], [2, 2, 2])
++        flat = [t.snapshot_id for b in batches for t in b]
++        self.assertEqual(flat, [t.snapshot_id for t in store.select_trajectories(conn, *DAY)])
++
++    def test_messages_attached_in_order(self):
++        conn = memory_store(make_snapshot("s1", "ep1", 5), make_snapshot("s2", "ep2", 3))
++        (batch,) = store.iter_trajectory_batches(conn, *DAY, batch_size=2)
++        self.assertEqual([m.idx for m in batch[0].messages], list(range(5)))
++        self.assertEqual([m.idx for m in batch[1].messages], list(range(3)))
++
++
+ if __name__ == "__main__":
+     unittest.main()

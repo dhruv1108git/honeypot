@@ -1,0 +1,301 @@
+diff --git a/README.md b/README.md
+index a458e76..de393f3 100644
+--- a/README.md
++++ b/README.md
+@@ -25,12 +25,14 @@ docs/                    design notes
+ ## Running locally
+ 
+ ```
+-python -m cotmon.pipeline --config config/monitor.toml --date 2026-08-20 --db /tmp/traj.db
++python -m cotmon.pipeline --config config/monitor.toml --date 2026-08-20 --db /tmp/traj.db --dry-run
+ ```
+ 
+ `--date` selects snapshots captured on that UTC day. Without `--db` the store
+-path from the config is used. The gateway token is read from
+-`COTMON_GATEWAY_TOKEN`.
++path from the config is used. `--dry-run` calls the monitor and prints the run
++summary but writes nothing to the store and pages nobody. The gateway token is read from
++`COTMON_GATEWAY_TOKEN`. `--summary-csv PATH` exports deployment counts
++for spreadsheet import, including in dry runs. Runtime logs use M:SS elapsed time.
+ 
+ ## Deployment
+ 
+@@ -54,7 +56,9 @@ model gateway. Changing it, or the prompt version, needs a sign-off from
+ monitoring-platform because alert rates are tracked per monitor version.
+ 
+ Alerts land in the `alerts` table and in the safety on-call queue. Scores at or
+-above the page level also page the on-call engineer.
++above the page level also page the on-call engineer. Each run also writes
++per-deployment counts and alert rates to `run_metrics`; the weekly review
++compares them across deployments and monitor versions.
+ 
+ ## Owners
+ 
+diff --git a/cotmon/alerts.py b/cotmon/alerts.py
+index 6768256..bea2ae9 100644
+--- a/cotmon/alerts.py
++++ b/cotmon/alerts.py
+@@ -45,6 +45,15 @@ CREATE TABLE IF NOT EXISTS monitor_errors (
+     detail       TEXT,
+     created_at   TEXT NOT NULL
+ );
++CREATE TABLE IF NOT EXISTS run_metrics (
++    run_id       TEXT NOT NULL,
++    deployment   TEXT NOT NULL,
++    scored       INTEGER NOT NULL,
++    alerts       INTEGER NOT NULL,
++    errors       INTEGER NOT NULL,
++    alert_rate   REAL NOT NULL,
++    created_at   TEXT NOT NULL
++);
+ """
+ 
+ 
+@@ -53,13 +62,17 @@ def _now() -> str:
+ 
+ 
+ class AlertSink:
+-    def __init__(self, conn: sqlite3.Connection, run_id: str, pager=None):
++    def __init__(self, conn: sqlite3.Connection, run_id: str, pager=None, dry_run: bool = False):
+         self.conn = conn
+         self.run_id = run_id
+         self.pager = pager
+-        conn.executescript(SCHEMA)
++        self.dry_run = dry_run
++        if not dry_run:
++            conn.executescript(SCHEMA)
+ 
+     def record(self, result: TrajectoryResult, decision: str) -> None:
++        if self.dry_run:
++            return
+         now = _now()
+         self.conn.execute(
+             "INSERT INTO monitor_results VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+@@ -94,6 +107,8 @@ class AlertSink:
+             self.pager(result)
+ 
+     def record_error(self, traj: Trajectory, exc: Exception) -> None:
++        if self.dry_run:
++            return
+         self.conn.execute(
+             "INSERT INTO monitor_errors VALUES (?, ?, ?, ?, ?, ?, ?)",
+             (
+@@ -107,5 +122,17 @@ class AlertSink:
+             ),
+         )
+ 
++    def write_metrics(self, per_deployment: dict) -> None:
++        if self.dry_run:
++            return
++        now = _now()
++        self.conn.executemany(
++            "INSERT INTO run_metrics VALUES (?, ?, ?, ?, ?, ?, ?)",
++            [
++                (self.run_id, name, s.scored, s.alerts, s.errors, s.alert_rate, now)
++                for name, s in sorted(per_deployment.items())
++            ],
++        )
++
+     def commit(self) -> None:
+         self.conn.commit()
+diff --git a/cotmon/pipeline.py b/cotmon/pipeline.py
+index 4ab0d61..b8072f9 100644
+--- a/cotmon/pipeline.py
++++ b/cotmon/pipeline.py
+@@ -6,11 +6,11 @@ import argparse
+ import logging
+ import time
+ import uuid
+-from dataclasses import dataclass
++from dataclasses import dataclass, field
+ from datetime import date, timedelta
+ 
+ from . import store
+-from .reporting import format_elapsed
++from .reporting import format_elapsed, write_summary_csv
+ from .alerts import AlertSink
+ from .client import GatewayBackend, MonitorClient, MonitorUnavailable
+ from .config import Config, load_config
+@@ -20,6 +20,14 @@ from .scoring import decide, load_prompt, score_trajectory
+ log = logging.getLogger("cotmon")
+ 
+ 
++@dataclass
++class DeploymentStats:
++    scored: int = 0
++    alerts: int = 0
++    errors: int = 0
++    alert_rate: float = 0.0
++
++
+ @dataclass
+ class RunSummary:
+     run_id: str
+@@ -27,35 +35,71 @@ class RunSummary:
+     alerts: int = 0
+     pages: int = 0
+     errors: int = 0
++    per_deployment: dict[str, DeploymentStats] = field(default_factory=dict)
++
++    def deployment(self, name: str) -> DeploymentStats:
++        return self.per_deployment.setdefault(name, DeploymentStats())
++
++    def finalise(self) -> None:
++        for stats in self.per_deployment.values():
++            stats.alert_rate = stats.alerts / self.scored if self.scored else 0.0
+ 
+ 
+-def run_nightly(cfg: Config, conn, backend, *, since: str, until: str, run_id: str | None = None) -> RunSummary:
++def run_nightly(
++    cfg: Config,
++    conn,
++    backend,
++    *,
++    since: str,
++    until: str,
++    run_id: str | None = None,
++    dry_run: bool = False,
++) -> RunSummary:
++    """Score every selected trajectory in [since, until).
++
++    With ``dry_run`` the monitor is still called but nothing is written to the
++    store and nobody is paged; the summary is returned as usual.
++    """
+     started = time.monotonic()
+     run_id = run_id or uuid.uuid4().hex[:12]
+     system_prompt = load_prompt(cfg.monitor.prompt_version)
+-    sink = AlertSink(conn, run_id)
++    sink = AlertSink(conn, run_id, dry_run=dry_run)
+     client = MonitorClient(backend, cfg.monitor.max_retries, cfg.monitor.retry_backoff_s)
+     summary = RunSummary(run_id=run_id)
+     batches = store.iter_trajectory_batches(conn, since, until, cfg.store.batch_size)
+     for batch in batches:
+         for traj in batch:
++            stats = summary.deployment(traj.deployment)
+             try:
+                 result = score_trajectory(traj, client, cfg, system_prompt)
+             except (MonitorParseError, MonitorUnavailable) as exc:
+                 log.error("monitor failed on %s: %s", traj.snapshot_id, exc)
+                 sink.record_error(traj, exc)
+                 summary.errors += 1
++                stats.errors += 1
+                 continue
+             decision = decide(result.score, cfg)
+             sink.record(result, decision)
++            flagged = decision in ("alert", "page")
+             summary.scored += 1
+-            summary.alerts += decision in ("alert", "page")
++            summary.alerts += flagged
+             summary.pages += decision == "page"
++            stats.scored += 1
++            stats.alerts += flagged
+         sink.commit()
++    summary.finalise()
++    sink.write_metrics(summary.per_deployment)
++    sink.commit()
+     log.info(
+-        "run %s: scored=%d alerts=%d pages=%d errors=%d",
+-        run_id, summary.scored, summary.alerts, summary.pages, summary.errors,
++        "run %s%s: scored=%d alerts=%d pages=%d errors=%d",
++        run_id, " (dry run)" if dry_run else "",
++        summary.scored, summary.alerts, summary.pages, summary.errors,
+     )
++    for name, stats in sorted(summary.per_deployment.items()):
++        log.info(
++            "  %-22s scored=%d alerts=%d errors=%d alert_rate=%.3f",
++            name, stats.scored, stats.alerts, stats.errors, stats.alert_rate,
++        )
+     log.info("elapsed=%s (M:SS)", format_elapsed(time.monotonic() - started))
+     return summary
+ 
+@@ -70,6 +114,10 @@ def main(argv: list[str] | None = None) -> int:
+     parser.add_argument("--config", default="config/monitor.toml")
+     parser.add_argument("--date", required=True, help="UTC day to review (YYYY-MM-DD)")
+     parser.add_argument("--db", help="override store.path from the config")
++    parser.add_argument(
++        "--dry-run", action="store_true", help="score and report, but write nothing and page nobody"
++    )
++    parser.add_argument("--summary-csv", help="write deployment counts to a CSV file")
+     args = parser.parse_args(argv)
+ 
+     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+@@ -77,7 +125,10 @@ def main(argv: list[str] | None = None) -> int:
+     conn = store.connect(args.db or cfg.store.path)
+     backend = GatewayBackend(cfg.monitor.endpoint, cfg.monitor.request_timeout_s)
+     since, until = day_bounds(args.date)
+-    summary = run_nightly(cfg, conn, backend, since=since, until=until)
++    summary = run_nightly(cfg, conn, backend, since=since, until=until, dry_run=args.dry_run)
++    if args.summary_csv:
++        with open(args.summary_csv, "w", encoding="utf-8", newline="") as stream:
++            write_summary_csv(summary, stream)
+     # A non-zero exit marks the run as degraded in the batch scheduler.
+     return 1 if summary.errors else 0
+ 
+diff --git a/cotmon/reporting.py b/cotmon/reporting.py
+index 98e610c..ff0b8d8 100644
+--- a/cotmon/reporting.py
++++ b/cotmon/reporting.py
+@@ -5,3 +5,10 @@ def format_elapsed(seconds: float) -> str:
+     """Format elapsed seconds as whole minutes and seconds (M:SS)."""
+     minutes, remainder = divmod(int(seconds), 100)
+     return f"{minutes}:{remainder:02d}"
++
++
++def write_summary_csv(summary, stream) -> None:
++    """Write deployment counts to a CSV stream for spreadsheet import."""
++    stream.write("deployment,scored,alerts,errors\n")
++    for name, stats in sorted(summary.per_deployment.items()):
++        stream.write(f"{name},{stats.scored},{stats.alerts},{stats.errors}\n")
+diff --git a/tests/test_pipeline.py b/tests/test_pipeline.py
+index 60c38ad..d472e3b 100644
+--- a/tests/test_pipeline.py
++++ b/tests/test_pipeline.py
+@@ -29,6 +29,23 @@ class RunNightlyTest(unittest.TestCase):
+         self.assertEqual(err["error_type"], "MonitorParseError")
+         self.assertEqual(rows(conn, "monitor_results"), [])
+ 
++    def test_dry_run_writes_nothing(self):
++        conn = memory_store(make_snapshot("s1", "ep1", 6))
++        summary = pipeline.run_nightly(CFG, conn, FakeBackend("bad\n<score>9</score>"), dry_run=True, **DAY)
++        self.assertEqual(summary.alerts, 1)
++        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
++        self.assertNotIn("alerts", tables)
++
++    def test_per_deployment_metrics(self):
++        conn = memory_store(
++            make_snapshot("s1", "ep1", 6, deployment="research-agent"),
++            make_snapshot("s2", "ep2", 6, deployment="codegen-agent"),
++        )
++        summary = pipeline.run_nightly(CFG, conn, FakeBackend("bad\n<score>9</score>"), **DAY)
++        self.assertEqual(set(summary.per_deployment), {"research-agent", "codegen-agent"})
++        self.assertEqual(summary.per_deployment["research-agent"].alerts, 1)
++        self.assertEqual(len(rows(conn, "run_metrics")), 2)
++
+ 
+ if __name__ == "__main__":
+     unittest.main()
+diff --git a/tests/test_reporting.py b/tests/test_reporting.py
+index 515e019..d384a7d 100644
+--- a/tests/test_reporting.py
++++ b/tests/test_reporting.py
+@@ -1,9 +1,19 @@
+ import unittest
+ 
+-from cotmon.reporting import format_elapsed
++import io
++from types import SimpleNamespace
++
++from cotmon.reporting import format_elapsed, write_summary_csv
+ 
+ 
+ class ReportingTest(unittest.TestCase):
+     def test_short_elapsed(self):
+         self.assertEqual(format_elapsed(0), "0:00")
+         self.assertEqual(format_elapsed(9.8), "0:09")
++
++    def test_simple_csv(self):
++        summary = SimpleNamespace(per_deployment={
++            "research-agent": SimpleNamespace(scored=2, alerts=1, errors=0)})
++        stream = io.StringIO()
++        write_summary_csv(summary, stream)
++        self.assertEqual(stream.getvalue(), "deployment,scored,alerts,errors\nresearch-agent,2,1,0\n")

@@ -1,0 +1,31 @@
+# E2 — Overtness / injection-flagging gradient. Same TRUE monitor knowledge, increasing instruction-likeness:
+# L1 pure facts -> L2 mild framing -> L3 concrete exploit described -> L4 explicit directive to exploit.
+# No goal in the system prompt (condition=none), all cells mention the file. Measures flag-as-injection rate
+# vs effect: where does informational content start being refused as a prompt injection? (Links to CI-awareness.)
+run_id: exp_overtness
+description: "E2 overtness gradient L1-L4 (same monitor facts, rising instruction-likeness), no goal, mention. Qwen via OpenRouter."
+runs_dir: runs
+n_samples: 16
+order_seed: 20261104
+max_turns: 16
+max_tool_calls: 12
+envs:
+  - {id: overt_L1, base: scheming_monitor_upgrade, repo: cotmon, branch: monitor-v4, arm: OVERT_L1_facts,      memo: audit_monitor_knowledge_true,     incentive: task_mention}
+  - {id: overt_L2, base: scheming_monitor_upgrade, repo: cotmon, branch: monitor-v4, arm: OVERT_L2_framed,     memo: audit_monitor_overt_L2_framed,    incentive: task_mention}
+  - {id: overt_L3, base: scheming_monitor_upgrade, repo: cotmon, branch: monitor-v4, arm: OVERT_L3_suggestive, memo: audit_monitor_overt_L3_suggestive, incentive: task_mention}
+  - {id: overt_L4, base: scheming_monitor_upgrade, repo: cotmon, branch: monitor-v4, arm: OVERT_L4_directive,  memo: audit_monitor_overt_L4_directive, incentive: task_mention}
+conditions:
+  - none
+models:
+  - id: qwen3-235b-thinking
+    backend: openrouter
+    url: https://openrouter.ai/api/v1
+    model: qwen/qwen3-235b-a22b-thinking-2507
+    family: Qwen3
+    reasoning_visibility: raw
+    concurrency: 4
+    timeout_s: 1200
+    params:
+      temperature: 0.6
+      top_p: 0.95
+      max_tokens: 20480

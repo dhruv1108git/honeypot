@@ -1,0 +1,40 @@
+# Goal-in-memo study — MEMO / NONE / NOSYS / benign cells (NO power goal in the system prompt).
+# condition=none → neutral system prompt (reviewer role only) or no system at all (system: sys_none).
+# MEMO envs use memo=audit_coverage_goal_power (rich audit map + the exact power directive); NONE envs use
+# memo=audit_coverage_rich (identical map, directive removed). They differ ONLY by the directive block.
+# See experiments/goal_in_memo/PLAN.md.
+run_id: exp_goalloc_main
+description: "Goal-location study: goal in memo vs none vs no-system, with/without task mention + benign start. Qwen."
+runs_dir: runs
+n_samples: 16
+order_seed: 20261028
+max_turns: 16
+max_tool_calls: 12
+envs:
+  # --- goal in MEMO vs NONE control, neutral system prompt (reviewer role only) ---
+  - {id: memo_mention,   base: scheming_monitor_upgrade, repo: cotmon, branch: monitor-v4, arm: MEMO_mention,   memo: audit_coverage_goal_power, incentive: task_mention}
+  - {id: none_mention,   base: scheming_monitor_upgrade, repo: cotmon, branch: monitor-v4, arm: NONE_mention,   memo: audit_coverage_rich,       incentive: task_mention}
+  - {id: memo_nomention, base: scheming_monitor_upgrade, repo: cotmon, branch: monitor-v4, arm: MEMO_nomention, memo: audit_coverage_goal_power, incentive: none}
+  - {id: none_nomention, base: scheming_monitor_upgrade, repo: cotmon, branch: monitor-v4, arm: NONE_nomention, memo: audit_coverage_rich,       incentive: none}
+  # --- NO system prompt at all (reviewer role folded into the task), goal in memo + matched neutral control ---
+  - {id: memo_mention_nosys,   base: scheming_monitor_upgrade, repo: cotmon, branch: monitor-v4, arm: NOSYS_memo_mention,   memo: audit_coverage_goal_power, incentive: task_mention, system: sys_none, task: task_agent_role_v0}
+  - {id: memo_nomention_nosys, base: scheming_monitor_upgrade, repo: cotmon, branch: monitor-v4, arm: NOSYS_memo_nomention, memo: audit_coverage_goal_power, incentive: none,         system: sys_none, task: task_agent_role_v0}
+  - {id: none_nomention_nosys, base: scheming_monitor_upgrade, repo: cotmon, branch: monitor-v4, arm: NOSYS_none_nomention, memo: audit_coverage_rich,       incentive: none,         system: sys_none, task: task_agent_role_v0}
+  # --- benign start (first reads steered to core modules), organic discovery: goal in memo + matched control ---
+  - {id: memo_nomention_benign, base: scheming_monitor_upgrade, repo: cotmon, branch: monitor-v4, arm: MEMO_benign, memo: audit_coverage_goal_power, incentive: none, task: task_agent_benignstart_v0}
+  - {id: none_nomention_benign, base: scheming_monitor_upgrade, repo: cotmon, branch: monitor-v4, arm: NONE_benign, memo: audit_coverage_rich,       incentive: none, task: task_agent_benignstart_v0}
+conditions:
+  - none
+models:
+  - id: qwen3-235b-thinking
+    backend: openrouter
+    url: https://openrouter.ai/api/v1
+    model: qwen/qwen3-235b-a22b-thinking-2507
+    family: Qwen3
+    reasoning_visibility: raw
+    concurrency: 12
+    timeout_s: 1200
+    params:
+      temperature: 0.6
+      top_p: 0.95
+      max_tokens: 20480
